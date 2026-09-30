@@ -30,7 +30,14 @@ OpenCode discovers immediate plugin package directories under
 
 ### Configured package
 
-Add it to `~/.config/opencode/opencode.jsonc`:
+Install from the repository with the OpenCode CLI (the package is not published
+to a public registry):
+
+```bash
+opencode plugin add github:Hawiyat-Org/opencode-extension
+```
+
+Or add it to `~/.config/opencode/opencode.jsonc`:
 
 ```jsonc
 {
