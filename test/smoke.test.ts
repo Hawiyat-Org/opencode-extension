@@ -11,6 +11,8 @@ process.env.XDG_DATA_HOME = join(sandbox, "data")
 const agentsDir = join(sandbox, "agents")
 
 import plugin from "../src/index"
+import { isCustomerFacingModelId } from "../src/hawiyat/catalog"
+import { FALLBACK_MODELS } from "../src/hawiyat/fallback-models"
 import { normalizeStreamingFetch, isOpenAIChunk } from "../src/hawiyat/stream"
 
 interface Calls {
@@ -207,6 +209,11 @@ describe("plugin setup", () => {
     const known = byId.get("claude-fable-5.1") as { cost?: Array<{ input: number }> } | undefined
     expect(known?.cost).toHaveLength(1)
     expect(known?.cost?.[0]?.input).toBeGreaterThan(0)
+  })
+
+  test("ships only customer-facing fallback ids", () => {
+    expect(FALLBACK_MODELS.length).toBeGreaterThan(20)
+    expect(FALLBACK_MODELS.every((m) => isCustomerFacingModelId(m.id))).toBe(true)
   })
 
   test("registers the stats command and usage_stats tool", () => {

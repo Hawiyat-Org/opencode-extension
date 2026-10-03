@@ -56,6 +56,19 @@ const NON_CHAT_MODES = new Set([
 /** Fallback filter for entries whose mode is unknown. */
 const NON_CHAT_ID = /(^text-embedding|^tts-|whisper|transcribe|^gpt-image|dall-e|moderation|rerank)/i
 
+/**
+ * Gateway-internal / leaf / provider-routing ids that must never surface to a
+ * customer. OpenAI-compatible ids use [a-z0-9./-]; a bare `h-` leaf namespace,
+ * `tmp-`/`demo`, `apifun`, an underscore, or a router/leaf/Analyzer name marks
+ * an internal entry.
+ */
+const INTERNAL_MODEL_ID =
+  /(^h-|^tmp[-_]|^Analyzer$|[-_]demo|[-_]router$|[-_]leaf$|[-_]apifun$|_)/i
+
+export function isCustomerFacingModelId(id: string): boolean {
+  return !INTERNAL_MODEL_ID.test(id)
+}
+
 function asString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined
 }
@@ -78,6 +91,7 @@ function toModel(
 ): CatalogModel | undefined {
   const mode = asString(info?.mode)?.toLowerCase()
   if (mode ? NON_CHAT_MODES.has(mode) : NON_CHAT_ID.test(id)) return undefined
+  if (!isCustomerFacingModelId(id)) return undefined
 
   return {
     id,
