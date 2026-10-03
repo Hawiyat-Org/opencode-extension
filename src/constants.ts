@@ -21,6 +21,11 @@ export const PROVIDER_PACKAGE = "@opencode/ai/providers/openai-compatible"
 /** Environment variable consulted for the gateway API key. */
 export const API_KEY_ENV = "HAWIYAT_API_KEY"
 
+/** Label and help text shown by the OpenCode `/connect` key prompt. */
+export const API_KEY_LABEL = "Hawiyat API key"
+export const API_KEY_DESCRIPTION =
+  "Paste your Hawiyat gateway API key (https://ai.hawiyat.cloud). OpenCode stores it in its credential store; it is never written to this repository."
+
 /** Integration / auth-store ids that may hold the gateway key. */
 export const INTEGRATION_IDS = ["hawiyat", "hawiyat-ai"] as const
 

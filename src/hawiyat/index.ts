@@ -19,7 +19,9 @@ import type { Context } from "@opencode/plugin/promise/plugin"
 import type { Registration } from "@opencode/plugin/promise/registration"
 import { Provider } from "@opencode/plugin"
 import {
+  API_KEY_DESCRIPTION,
   API_KEY_ENV,
+  API_KEY_LABEL,
   BASE_URL,
   INTEGRATION_IDS,
   PROVIDER_ID,
@@ -27,6 +29,7 @@ import {
   PROVIDER_PACKAGE,
 } from "../constants"
 import { fetchModels, readCache, writeCache, type CatalogModel } from "./catalog"
+import { FALLBACK_MODELS } from "./fallback-models"
 import { normalizeSSEResponse } from "./stream"
 
 export type Cleanup = () => void | Promise<void>
@@ -137,7 +140,10 @@ function toModelInfo(model: CatalogModel): unknown {
 
 export async function setupHawiyat(ctx: Context, cleanups: Cleanup[]): Promise<Registration[]> {
   const registrations: Registration[] = []
-  const state: { models: CatalogModel[]; apiKey?: string } = { models: readCache() }
+  const cached = readCache()
+  const state: { models: CatalogModel[]; apiKey?: string } = {
+    models: cached.length > 0 ? cached : FALLBACK_MODELS,
+  }
   const keys = makeKeyResolver(ctx)
 
   const refresh = async (): Promise<void> => {
@@ -159,23 +165,64 @@ export async function setupHawiyat(ctx: Context, cleanups: Cleanup[]): Promise<R
   // settings; the runtime needs it at provider construction time.
   state.apiKey = await keys.resolve()
 
-  // On a cold start with no cache, try once so models are selectable
-  // immediately. A warm start refreshes in the background.
-  if (state.models.length === 0) {
+  // On a cold start, try once so the real key-scoped catalog is used
+  // immediately. A warm start (or the bundled fallback) refreshes in the
+  // background.
+  if (cached.length === 0) {
     await refresh()
   } else {
     void refresh()
   }
 
+  // Register the `/connect` entry FIRST, so the provider below can link to it.
+  // `integration.transform` upserts: `editor.update` creates the integration
+  // when it does not exist yet, and `method.update` declares how to authenticate
+  // (an API-key form plus an env-var method). This is what makes `hawiyat`
+  // appear in `/connect`, `opencode auth login hawiyat`, and the onboarding UI.
+  registrations.push(
+    await ctx.integration.transform((editor) => {
+      editor.update(PROVIDER_ID, (integration) => {
+        integration.name = PROVIDER_NAME
+      })
+      editor.method.update({
+        integrationID: PROVIDER_ID,
+        method: {
+          type: "key",
+          label: API_KEY_LABEL,
+          form: [
+            {
+              type: "string",
+              key: "key",
+              title: API_KEY_LABEL,
+              description: API_KEY_DESCRIPTION,
+              required: true,
+              hidden: true,
+            },
+          ],
+        },
+      })
+      editor.method.update({
+        integrationID: PROVIDER_ID,
+        method: { type: "env", names: [API_KEY_ENV] },
+      })
+    }),
+  )
+
   registrations.push(
     await ctx.provider.transform((editor) => {
+      // OpenCode resolves the credential from the linked integration at request
+      // time, so the key is NOT baked into settings (that would go stale when
+      // the user connects after install). Only an explicit plugin option is
+      // forwarded, as an escape hatch for CI/headless use.
       const settings: Record<string, unknown> = { baseURL: BASE_URL }
-      if (state.apiKey) settings.apiKey = state.apiKey
+      const optionKey = extractKey((ctx.options as Record<string, unknown>).apiKey)
+      if (optionKey) settings.apiKey = optionKey
       const info = {
         ...Provider.Info.empty(PROVIDER_ID as never),
         name: PROVIDER_NAME,
         activation: "enabled" as const,
         package: PROVIDER_PACKAGE,
+        integrationID: PROVIDER_ID,
         settings,
       }
       editor.add({

@@ -230,3 +230,49 @@ tools.usage_stats({ range: "all", format: "json" })
    `hawiyat-composer` streamed frames labelled `claude-opus-5`) and one catalog
    model (`hawiyat-tornado`) returned an internal error in testing. Provider
    behaviour is upstream.
+
+## Overhaul — auto `/connect` + catalog fallback (2026-10-03)
+
+Re-verified against `opencode 2.0.12` (the binary installed on the review
+machine), with `@opencode/plugin` 2.0.20 type definitions.
+
+### The `/connect` key prompt is a plugin-registered integration
+`IntegrationEditor` has no `add`, but **`editor.update(id, fn)` is an upsert**:
+passing an unknown id creates the integration. Together with
+`editor.method.update({ integrationID, method: { type: "key", label, form } })`
+and `{ type: "env", names }`, this registers a first-class `/connect` entry.
+Observed via `opencode api GET /api/integration`:
+
+```json
+{"id":"hawiyat","name":"Hawiyat","methods":[
+  {"type":"key","label":"Hawiyat API key","form":[{"key":"key","type":"string","hidden":true,"required":true}]},
+  {"type":"env","names":["HAWIYAT_API_KEY"]}]}
+```
+
+### OpenCode injects the integration credential at request time
+A provider registered with `info.integrationID` and **no** `settings.apiKey`
+still authenticated: after connecting a credential to the integration, a request
+reached the gateway (failing only on the raw-SSE parse, pre-fix), while
+`GET /api/provider` showed just `{ baseURL }`. Therefore the key must **not** be
+baked into `settings`; the plugin resolves a key only to fetch the catalog.
+
+### Bundled fallback catalog
+`src/hawiyat/fallback-models.ts` seeds ~69 ids captured from a live key. It is
+used only before the first successful `/v1/models` refresh, so a cold, key-less
+install still shows selectable models.
+
+### End-to-end evidence (`opencode 2.0.12`)
+
+| Check | Result |
+|-------|--------|
+| `opencode plugin list` | `hawiyat.opencode-extension` |
+| `/api/integration` | hawiyat + key form + `HAWIYAT_API_KEY` env method |
+| `/api/provider` | hawiyat, `integrationID: hawiyat`, settings `{ baseURL }` |
+| `opencode models` | 77 `hawiyat/*` |
+| `opencode run -m hawiyat/hawiyat-composer` | `EXT_OK` (streaming via `http.response`) |
+| `opencode debug agents` | scout / researcher / worker |
+| `/stats` command | registered |
+
+This replaces the earlier hand-rolled setup (a `provider` block in
+`~/.config/opencode/opencode.json` plus a separate loopback proxy plugin), both
+of which were removed once parity was proven.

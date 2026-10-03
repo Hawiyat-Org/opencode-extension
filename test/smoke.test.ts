@@ -6,6 +6,7 @@ import { join } from "node:path"
 // Keep the plugin away from the real caches/config while testing.
 const sandbox = mkdtempSync(join(tmpdir(), "hawiyat-ext-"))
 process.env.XDG_CACHE_HOME = join(sandbox, "cache")
+process.env.XDG_DATA_HOME = join(sandbox, "data")
 
 const agentsDir = join(sandbox, "agents")
 
@@ -15,11 +16,15 @@ import { normalizeStreamingFetch, isOpenAIChunk } from "../src/hawiyat/stream"
 interface Calls {
   providerAdds: number
   modelAdds: number
+  providerInfos: Array<Record<string, unknown>>
   toolAdds: string[]
   toolUpdates: string[]
   commands: string[]
   hooks: string[]
   agentUpdates: string[]
+  integrationUpdates: string[]
+  keyMethods: Array<Record<string, unknown>>
+  envMethods: Array<ReadonlyArray<string>>
 }
 
 function makeFakeContext(calls: Calls): unknown {
@@ -40,6 +45,10 @@ function makeFakeContext(calls: Calls): unknown {
     cb(makeAgentEditor(calls) as never)
     return Promise.resolve(registration)
   }
+  const integrationTransform = (cb: (editor: never) => void) => {
+    cb(makeIntegrationEditor(calls) as never)
+    return Promise.resolve(registration)
+  }
   return {
     app: { name: "test", version: "0.0.0", channel: "test" },
     location: { directory: sandbox, project: { id: "test", directory: sandbox, canonical: sandbox } },
@@ -56,6 +65,8 @@ function makeFakeContext(calls: Calls): unknown {
       },
     },
     integration: {
+      transform: integrationTransform,
+      reload: async () => {},
       connection: {
         active: async () => undefined,
         resolve: async () => undefined,
@@ -73,9 +84,10 @@ function makeFakeContext(calls: Calls): unknown {
 
 function makeProviderEditor(calls: Calls): unknown {
   return {
-    add: (input: { models?: unknown[] }) => {
+    add: (input: { info?: Record<string, unknown>; models?: unknown[] }) => {
       calls.providerAdds += 1
       calls.modelAdds += input.models?.length ?? 0
+      if (input.info) calls.providerInfos.push(input.info)
     },
     list: () => [],
     get: () => undefined,
@@ -115,14 +127,36 @@ function makeAgentEditor(calls: Calls): unknown {
   }
 }
 
+function makeIntegrationEditor(calls: Calls): unknown {
+  return {
+    list: () => [],
+    get: () => undefined,
+    update: (id: string) => { calls.integrationUpdates.push(id) },
+    remove: () => {},
+    method: {
+      list: () => [],
+      update: (input: { integrationID: string; method: Record<string, unknown> }) => {
+        calls.integrationUpdates.push(input.integrationID)
+        if (input.method.type === "key") calls.keyMethods.push(input.method)
+        if (input.method.type === "env") calls.envMethods.push(input.method.names as ReadonlyArray<string>)
+      },
+      remove: () => {},
+    },
+  }
+}
+
 const calls: Calls = {
   providerAdds: 0,
   modelAdds: 0,
+  providerInfos: [],
   toolAdds: [],
   toolUpdates: [],
   commands: [],
   hooks: [],
   agentUpdates: [],
+  integrationUpdates: [],
+  keyMethods: [],
+  envMethods: [],
 }
 
 describe("plugin setup", () => {
@@ -135,6 +169,27 @@ describe("plugin setup", () => {
   test("registers the hawiyat provider and stream-normalizing session hook", () => {
     expect(calls.providerAdds).toBe(1)
     expect(calls.hooks).toContain("session:http.response")
+  })
+
+  test("registers the /connect integration with key + env methods", () => {
+    expect(calls.integrationUpdates).toContain("hawiyat")
+    expect(calls.keyMethods).toHaveLength(1)
+    const key = calls.keyMethods[0] as { type: string; label: string; form: Array<Record<string, unknown>> }
+    expect(key.type).toBe("key")
+    expect(key.form[0]).toMatchObject({ key: "key", type: "string", hidden: true, required: true })
+    expect(calls.envMethods.flat()).toContain("HAWIYAT_API_KEY")
+  })
+
+  test("links the provider to the integration and does not bake in the key", () => {
+    const info = calls.providerInfos[0] as { integrationID?: string; settings?: Record<string, unknown> }
+    expect(info.integrationID).toBe("hawiyat")
+    expect(info.settings?.baseURL).toBe("https://ai.hawiyat.cloud/v1")
+    expect(info.settings?.apiKey).toBeUndefined()
+  })
+
+  test("seeds the bundled fallback catalog on a cold start with no key", () => {
+    // No cache and no credentials in the sandbox -> the bundled catalog is used.
+    expect(calls.modelAdds).toBeGreaterThan(50)
   })
 
   test("registers the stats command and usage_stats tool", () => {

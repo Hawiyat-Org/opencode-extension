@@ -51,16 +51,25 @@ loader for compatibility, but new configuration should use `plugins`.
 
 ### Credentials
 
-The `hawiyat` provider resolves the gateway API key at request time, in order:
+On first load the plugin **registers a `hawiyat` integration** with OpenCode, so
+the provider appears in the `/connect` picker (and `opencode auth login hawiyat`)
+with a **Hawiyat API key** prompt and a `HAWIYAT_API_KEY` environment method. The
+provider is linked to that integration via `integrationID`, and OpenCode injects
+the stored credential into each request at call time.
+
+The plugin resolves a key only to fetch the model catalog, in this order:
 
 1. plugin option `apiKey`
 2. environment variable `HAWIYAT_API_KEY`
-3. the OpenCode integration connection for `hawiyat` or `hawiyat-ai`
-4. the OpenCode auth store (`<data>/opencode/auth.json`)
+3. the OpenCode integration connection for `hawiyat`
+4. the OpenCode auth store (`<data>/opencode/auth.json`), for legacy setups
 
-No key is ever written to the repository or to plugin settings. To store one
-with OpenCode, run `/connect` and choose a Hawiyat provider entry, or export
-`HAWIYAT_API_KEY` in the OpenCode server environment.
+No key is ever written to the repository or to plugin settings. Connect once:
+
+```bash
+opencode auth login hawiyat   # interactive key prompt
+# or, in the TUI:  /connect  ->  Hawiyat
+```
 
 ### Options
 
@@ -99,8 +108,8 @@ Each capability maps to a host-native mechanism:
 | hawiyat provider | provider transform | `ctx.provider.transform(editor => editor.add({ info, models }))` with `Provider.Info.empty(id)` and `package: "@opencode/ai/providers/openai-compatible"`, `settings.baseURL` |
 | provider models | provider transform (same edit) | `editor.add({ models })`, built with `Model.Info.default(providerID, id)` |
 | gateway SSE fix | session HTTP response hook, scoped by provider | `ctx.session.hook("http.response", event => { event.response = normalizeSSEResponse(event.response) }, { providerID: "hawiyat" })` |
-| gateway API key | provider settings | `settings.apiKey` resolved from options → `HAWIYAT_API_KEY` → integration connection → auth store |
-| model catalog | on-disk cache + periodic refresh | `fetch("/v1/models")`, `fetch("/model_group/info")`, `ctx.provider.reload()` |
+| gateway API key | `/connect` integration + provider link | `ctx.integration.transform(e => { e.update(id, i => …); e.method.update({ integrationID, method: { type: "key", form } }) })`; provider `info.integrationID = id` |
+| model catalog | on-disk cache + bundled fallback + periodic refresh | `fetch("/v1/models")`, `fetch("/model_group/info")`, `src/hawiyat/fallback-models.ts`, `ctx.provider.reload()` |
 | `/stats` command | command transform | `ctx.command.transform(editor => editor.add({ name, execute }))` |
 | `usage_stats` tool | tool transform | `ctx.tool.transform(editor => editor.add({ name, input, execute }))` |
 | stats aggregation | host session store (read-only) | `bun:sqlite` over `<data>/opencode/opencode.db` (`session`, `message`, `part`) |
