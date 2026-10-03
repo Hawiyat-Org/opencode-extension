@@ -17,13 +17,13 @@ import { homedir } from "node:os"
 import { join } from "node:path"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import type { Registration } from "@opencode/plugin/promise/registration"
-import { Provider } from "@opencode/plugin"
+import { Integration, Model, Provider } from "@opencode/plugin"
 import {
-  API_KEY_DESCRIPTION,
   API_KEY_ENV,
   API_KEY_LABEL,
+  AUTH_STORE_INTEGRATION_IDS,
   BASE_URL,
-  INTEGRATION_IDS,
+  INTEGRATION_ID,
   PROVIDER_ID,
   PROVIDER_NAME,
   PROVIDER_PACKAGE,
@@ -52,7 +52,7 @@ function readAuthKey(): string | undefined {
   const base = process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share")
   try {
     const raw = JSON.parse(readFileSync(join(base, "opencode", "auth.json"), "utf8")) as Record<string, unknown>
-    for (const id of INTEGRATION_IDS) {
+    for (const id of AUTH_STORE_INTEGRATION_IDS) {
       const key = extractKey(raw?.[id])
       if (key) return key
     }
@@ -72,18 +72,14 @@ function makeKeyResolver(ctx: Context): KeyResolver {
 
   const fromIntegration = (): Promise<string | undefined> => {
     integrationPromise ??= (async () => {
-      for (const id of INTEGRATION_IDS) {
-        try {
-          const connection = await ctx.integration.connection.active(id)
-          if (!connection) continue
-          const value = await ctx.integration.connection.resolve(connection)
-          const key = extractKey(value)
-          if (key) return key
-        } catch {
-          // Try the next integration id.
-        }
+      try {
+        const connection = await ctx.integration.connection.active(INTEGRATION_ID)
+        if (!connection) return undefined
+        const value = await ctx.integration.connection.resolve(connection)
+        return extractKey(value)
+      } catch {
+        return undefined
       }
-      return undefined
     })()
     return integrationPromise
   }
@@ -112,6 +108,10 @@ function makeKeyResolver(ctx: Context): KeyResolver {
 
 /** Convert a catalog entry into the OpenCode model shape. */
 function toModelInfo(model: CatalogModel): unknown {
+  // The gateway reports null prices for models whose cost is unknown; the
+  // capture stores those as 0. OpenCode renders a zeroed tier as `$0`, so emit
+  // no tier at all ("no pricing") instead of a misleading free tier.
+  const hasKnownCost = model.cost.input > 0 || model.cost.output > 0
   return {
     id: model.id,
     modelID: model.id,
@@ -120,13 +120,15 @@ function toModelInfo(model: CatalogModel): unknown {
     capabilities: { tools: true, input: model.input, output: ["text"] },
     variants: [],
     time: { released: 0 },
-    cost: [
-      {
-        input: model.cost.input,
-        output: model.cost.output,
-        cache: { read: model.cost.cacheRead, write: model.cost.cacheWrite },
-      },
-    ],
+    cost: hasKnownCost
+      ? [
+          {
+            input: model.cost.input,
+            output: model.cost.output,
+            cache: { read: model.cost.cacheRead, write: model.cost.cacheWrite },
+          },
+        ]
+      : [],
     status: "active",
     enabled: true,
     limit: { context: model.contextWindow, output: model.maxTokens },
@@ -141,7 +143,7 @@ function toModelInfo(model: CatalogModel): unknown {
 export async function setupHawiyat(ctx: Context, cleanups: Cleanup[]): Promise<Registration[]> {
   const registrations: Registration[] = []
   const cached = readCache()
-  const state: { models: CatalogModel[]; apiKey?: string } = {
+  const state: { models: CatalogModel[] } = {
     models: cached.length > 0 ? cached : FALLBACK_MODELS,
   }
   const keys = makeKeyResolver(ctx)
@@ -149,7 +151,6 @@ export async function setupHawiyat(ctx: Context, cleanups: Cleanup[]): Promise<R
   const refresh = async (): Promise<void> => {
     const key = await keys.resolve()
     if (!key) return
-    state.apiKey = key
     try {
       const fetched = await fetchModels(key, AbortSignal.timeout(10_000))
       if (fetched.length === 0) return
@@ -161,10 +162,6 @@ export async function setupHawiyat(ctx: Context, cleanups: Cleanup[]): Promise<R
     }
   }
 
-  // Resolve the credential up front so it can be attached to the provider
-  // settings; the runtime needs it at provider construction time.
-  state.apiKey = await keys.resolve()
-
   // On a cold start, try once so the real key-scoped catalog is used
   // immediately. A warm start (or the bundled fallback) refreshes in the
   // background.
@@ -174,39 +171,39 @@ export async function setupHawiyat(ctx: Context, cleanups: Cleanup[]): Promise<R
     void refresh()
   }
 
-  // Register the `/connect` entry FIRST, so the provider below can link to it.
-  // `integration.transform` upserts: `editor.update` creates the integration
-  // when it does not exist yet, and `method.update` declares how to authenticate
-  // (an API-key form plus an env-var method). This is what makes `hawiyat`
-  // appear in `/connect`, `opencode auth login hawiyat`, and the onboarding UI.
-  registrations.push(
-    await ctx.integration.transform((editor) => {
-      editor.update(PROVIDER_ID, (integration) => {
-        integration.name = PROVIDER_NAME
-      })
-      editor.method.update({
-        integrationID: PROVIDER_ID,
-        method: {
-          type: "key",
-          label: API_KEY_LABEL,
-          form: [
-            {
-              type: "string",
-              key: "key",
-              title: API_KEY_LABEL,
-              description: API_KEY_DESCRIPTION,
-              required: true,
-              hidden: true,
-            },
-          ],
-        },
-      })
-      editor.method.update({
-        integrationID: PROVIDER_ID,
-        method: { type: "env", names: [API_KEY_ENV] },
-      })
-    }),
-  )
+  // Register the `/connect` entry. `editor.update` is an upsert on a
+  // fresh-replay collection (an unknown id is created) and
+  // `editor.method.update` upserts by method type, so repeated loads replace
+  // rather than accumulate. Guarded anyway: this affordance is optional and
+  // must never skip the provider registration below.
+  try {
+    registrations.push(
+      await ctx.integration.transform((editor) => {
+        editor.update(INTEGRATION_ID, (integration) => {
+          integration.name = PROVIDER_NAME
+        })
+        // A `key` method carries OpenCode's built-in API-key prompt; its `form`
+        // holds extra configuration only. Hawiyat needs none, so no `form` is
+        // declared. (A `hidden: true, required: true` field with no `default`
+        // fails validation on both `/connect` and `opencode auth login`.)
+        editor.method.update({
+          integrationID: INTEGRATION_ID,
+          method: {
+            type: "key",
+            label: API_KEY_LABEL,
+          },
+        })
+        editor.method.update({
+          integrationID: INTEGRATION_ID,
+          method: { type: "env", names: [API_KEY_ENV] },
+        })
+      }),
+    )
+  } catch (error) {
+    // The integration is optional; without it the provider still works via
+    // HAWIYAT_API_KEY / auth.json. Do not let it take down the provider.
+    console.error(`[${PROVIDER_ID}] failed to register /connect integration:`, error)
+  }
 
   registrations.push(
     await ctx.provider.transform((editor) => {
@@ -218,16 +215,16 @@ export async function setupHawiyat(ctx: Context, cleanups: Cleanup[]): Promise<R
       const optionKey = extractKey((ctx.options as Record<string, unknown>).apiKey)
       if (optionKey) settings.apiKey = optionKey
       const info = {
-        ...Provider.Info.empty(PROVIDER_ID as never),
+        ...Provider.Info.empty(PROVIDER_ID as Provider.ID),
         name: PROVIDER_NAME,
         activation: "enabled" as const,
         package: PROVIDER_PACKAGE,
-        integrationID: PROVIDER_ID,
+        integrationID: INTEGRATION_ID as Integration.ID,
         settings,
       }
       editor.add({
-        info: info as never,
-        models: state.models.map(toModelInfo) as never,
+        info,
+        models: state.models.map(toModelInfo) as Model.Info[],
       })
     }),
   )

@@ -17,6 +17,7 @@ interface Calls {
   providerAdds: number
   modelAdds: number
   providerInfos: Array<Record<string, unknown>>
+  providerModels: Array<Record<string, unknown>>
   toolAdds: string[]
   toolUpdates: string[]
   commands: string[]
@@ -84,10 +85,11 @@ function makeFakeContext(calls: Calls): unknown {
 
 function makeProviderEditor(calls: Calls): unknown {
   return {
-    add: (input: { info?: Record<string, unknown>; models?: unknown[] }) => {
+    add: (input: { info?: Record<string, unknown>; models?: Array<Record<string, unknown>> }) => {
       calls.providerAdds += 1
       calls.modelAdds += input.models?.length ?? 0
       if (input.info) calls.providerInfos.push(input.info)
+      if (input.models) calls.providerModels.push(...input.models)
     },
     list: () => [],
     get: () => undefined,
@@ -149,6 +151,7 @@ const calls: Calls = {
   providerAdds: 0,
   modelAdds: 0,
   providerInfos: [],
+  providerModels: [],
   toolAdds: [],
   toolUpdates: [],
   commands: [],
@@ -174,9 +177,12 @@ describe("plugin setup", () => {
   test("registers the /connect integration with key + env methods", () => {
     expect(calls.integrationUpdates).toContain("hawiyat")
     expect(calls.keyMethods).toHaveLength(1)
-    const key = calls.keyMethods[0] as { type: string; label: string; form: Array<Record<string, unknown>> }
+    // A `key` method carries OpenCode's built-in API-key prompt; no custom form
+    // may be declared (a hidden+required field with no default fails validation).
+    const key = calls.keyMethods[0] as { type: string; label: string; form?: unknown }
     expect(key.type).toBe("key")
-    expect(key.form[0]).toMatchObject({ key: "key", type: "string", hidden: true, required: true })
+    expect(key.label).toBe("Hawiyat API key")
+    expect(key.form).toBeUndefined()
     expect(calls.envMethods.flat()).toContain("HAWIYAT_API_KEY")
   })
 
@@ -189,7 +195,18 @@ describe("plugin setup", () => {
 
   test("seeds the bundled fallback catalog on a cold start with no key", () => {
     // No cache and no credentials in the sandbox -> the bundled catalog is used.
-    expect(calls.modelAdds).toBeGreaterThan(50)
+    // The bound is loose on purpose: the fallback is filtered to
+    // customer-facing ids separately.
+    expect(calls.modelAdds).toBeGreaterThan(20)
+  })
+
+  test("renders unknown model cost as no pricing instead of $0", () => {
+    const byId = new Map(calls.providerModels.map((m) => [m.id, m]))
+    const unknown = byId.get("hawiyat-composer") as { cost?: unknown[] } | undefined
+    expect(unknown?.cost).toEqual([])
+    const known = byId.get("claude-fable-5.1") as { cost?: Array<{ input: number }> } | undefined
+    expect(known?.cost).toHaveLength(1)
+    expect(known?.cost?.[0]?.input).toBeGreaterThan(0)
   })
 
   test("registers the stats command and usage_stats tool", () => {
