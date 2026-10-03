@@ -49,7 +49,7 @@ Key type paths:
 | hawiyat provider | provider transform | `ctx.provider.transform(e => e.add({ info, models }))` with `Provider.Info.empty(id)`, `package`, `settings` | `@opencode/plugin/promise/provider`, `@opencode/schema/provider` |
 | provider models | build with defaults | `Model.Info.default(providerID, id)` then set `name`, `cost[]`, `limit`, `capabilities`, `compatibility` | `@opencode/schema/model` |
 | model catalog | network + cache | `GET /v1/models`, `GET /model_group/info`, `$XDG_CACHE_HOME/opencode/hawiyat-models.json`, `ctx.provider.reload()` | – |
-| gateway key | provider settings | `settings.apiKey` resolved from options → `HAWIYAT_API_KEY` → `ctx.integration.connection.resolve` → `auth.json` | `@opencode/plugin/promise/integration` |
+| gateway key | `/connect` integration + provider link | `info.integrationID = "hawiyat"`; OpenCode injects the stored credential at request time. Only an explicit plugin option is forwarded in `settings.apiKey` (CI/headless escape hatch). The key is resolved from options → `HAWIYAT_API_KEY` → integration connection → `auth.json` for catalog fetching only | `@opencode/plugin/promise/integration` |
 | gateway SSE | session response hook | `ctx.session.hook("http.response", event => { event.response = normalizeSSEResponse(event.response) }, { providerID: "hawiyat" })` | `@opencode/plugin/promise/session`, `@opencode/schema/session` |
 | `/stats` | command transform | `ctx.command.transform(e => e.add({ name: "stats", execute }))`; output via `ctx.session.synthetic({ sessionID, text })` | `@opencode/plugin/promise/command` |
 | `usage_stats` | tool transform | `ctx.tool.transform(e => e.add({ name, description, input, execute }))` | `@opencode/plugin/promise/tool`, `@opencode/schema/tool` |
@@ -118,11 +118,13 @@ V2 uses `plugins` (plural) and `providers` (plural). The machine's
 `options.baseURL`); it is left untouched. The plugin registers its provider with
 `ctx.provider.transform`, so no config edit is required.
 
-### 6. `/model_group/info` may be forbidden
+### 6. `/model_group/info` enrichment is optional
 
-With the working key the gateway returns `403` for `/model_group/info`, so model
-enrichment (mode/vision/reasoning/cost) is skipped and defaults apply, exactly
-as the pi implementation already tolerates.
+With some keys the gateway returns `403` for `/model_group/info`; a later live
+probe returned `200`, so the claim "always 403" is stale. Either way the plugin
+only reads mode/vision/reasoning/cost/limit fields from it and never persists
+provider names, and when enrichment is unavailable defaults apply, exactly as
+the pi implementation already tolerates.
 
 ## Verification (exact commands, observed results)
 
@@ -237,17 +239,35 @@ Re-verified against `opencode 2.0.12` (the binary installed on the review
 machine), with `@opencode/plugin` 2.0.20 type definitions.
 
 ### The `/connect` key prompt is a plugin-registered integration
-`IntegrationEditor` has no `add`, but **`editor.update(id, fn)` is an upsert**:
-passing an unknown id creates the integration. Together with
-`editor.method.update({ integrationID, method: { type: "key", label, form } })`
+`IntegrationEditor` has no `add` because `editor.update(id, fn)` **is the
+create primitive**: the runtime creates a default entry for an unknown id
+before running the callback (verified against the compiled `opencode 2.0.12`
+bundle, and reproduced on a clean `XDG_DATA_HOME` cold store where no `hawiyat`
+integration existed). Together with
+`editor.method.update({ integrationID, method: { type: "key", label } })`
 and `{ type: "env", names }`, this registers a first-class `/connect` entry.
-Observed via `opencode api GET /api/integration`:
+Observed via `opencode api GET /api/integration` on the cold store:
 
 ```json
 {"id":"hawiyat","name":"Hawiyat","methods":[
-  {"type":"key","label":"Hawiyat API key","form":[{"key":"key","type":"string","hidden":true,"required":true}]},
-  {"type":"env","names":["HAWIYAT_API_KEY"]}]}
+  {"type":"key","label":"Hawiyat API key"},
+  {"type":"env","names":["HAWIYAT_API_KEY"]}],
+ "connections":[]}
 ```
+
+Two related findings, both verified in the same bundle:
+
+- **No custom key `form`.** A `key` method already carries OpenCode's built-in
+  API-key prompt; the method `form` holds extra configuration only. Declaring a
+  `hidden: true, required: true` string field with no `default` fails validation
+  on both `/connect` (`Missing required form field: key`) and
+  `opencode auth login` (`key: Answer required`), so the form was removed — the
+  built-in prompt *is* the key prompt.
+- **No duplication, no `reload()` needed.** `method.update` is keyed by method
+  `type` for `key`/`env`, so repeated plugin loads replace rather than
+  accumulate (two cold loads showed exactly 2 methods). `ctx.integration.reload()`
+  only replays transforms after *external* state changes; the transform itself
+  already triggers the same reload, so it is not called on first load.
 
 ### OpenCode injects the integration credential at request time
 A provider registered with `info.integrationID` and **no** `settings.apiKey`
@@ -257,16 +277,22 @@ reached the gateway (failing only on the raw-SSE parse, pre-fix), while
 baked into `settings`; the plugin resolves a key only to fetch the catalog.
 
 ### Bundled fallback catalog
-`src/hawiyat/fallback-models.ts` seeds ~69 ids captured from a live key. It is
-used only before the first successful `/v1/models` refresh, so a cold, key-less
-install still shows selectable models.
+`src/hawiyat/fallback-models.ts` seeds 46 customer-facing ids. It is used only
+before the first successful `/v1/models` refresh, so a cold, key-less install
+still shows selectable models. The file is generated by
+`scripts/capture-fallback.ts` (`HAWIYAT_API_KEY=… bun run models:refresh`;
+regenerate when the gateway list changes, otherwise on review cadence) and
+filtered by `isCustomerFacingModelId`, which also filters the live refresh —
+gateway-internal routing/leaf names (`h-*` leaves, `Analyzer`, routers) never
+surface to customers in either path. Models whose price is unknown upstream
+carry no cost tier, so the picker shows "no pricing" instead of `$0`.
 
 ### End-to-end evidence (`opencode 2.0.12`)
 
 | Check | Result |
 |-------|--------|
 | `opencode plugin list` | `hawiyat.opencode-extension` |
-| `/api/integration` | hawiyat + key form + `HAWIYAT_API_KEY` env method |
+| `/api/integration` | hawiyat + built-in key prompt + `HAWIYAT_API_KEY` env method |
 | `/api/provider` | hawiyat, `integrationID: hawiyat`, settings `{ baseURL }` |
 | `opencode models` | 77 `hawiyat/*` |
 | `opencode run -m hawiyat/hawiyat-composer` | `EXT_OK` (streaming via `http.response`) |
