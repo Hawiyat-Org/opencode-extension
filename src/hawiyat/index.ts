@@ -29,7 +29,6 @@ import {
   PROVIDER_PACKAGE,
 } from "../constants"
 import { fetchModels, readCache, writeCache, type CatalogModel } from "./catalog"
-import { FALLBACK_MODELS } from "./fallback-models"
 import { normalizeSSEResponse } from "./stream"
 
 export type Cleanup = () => void | Promise<void>
@@ -149,9 +148,7 @@ function asPrice(value: number): CostTier["input"] {
 export async function setupHawiyat(ctx: Context, cleanups: Cleanup[]): Promise<Registration[]> {
   const registrations: Registration[] = []
   const cached = readCache()
-  const state: { models: CatalogModel[] } = {
-    models: cached.length > 0 ? cached : FALLBACK_MODELS,
-  }
+  const state: { models: CatalogModel[] } = { models: cached }
   const keys = makeKeyResolver(ctx)
 
   const refresh = async (): Promise<void> => {
@@ -169,8 +166,7 @@ export async function setupHawiyat(ctx: Context, cleanups: Cleanup[]): Promise<R
   }
 
   // On a cold start, try once so the real key-scoped catalog is used
-  // immediately. A warm start (or the bundled fallback) refreshes in the
-  // background.
+  // immediately. A warm start refreshes in the background.
   if (cached.length === 0) {
     await refresh()
   } else {

@@ -25,8 +25,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "bun test",
-    "check": "bun run typecheck && bun test",
-    "models:refresh": "bun run scripts/capture-fallback.ts"
+    "check": "bun run typecheck && bun test"
   },
   "dependencies": {
     "@mozilla/readability": "^0.5.0",

@@ -10,9 +10,19 @@ process.env.XDG_DATA_HOME = join(sandbox, "data")
 
 const agentsDir = join(sandbox, "agents")
 
+// A real key in the developer's shell would turn the "key-less" tests into
+// live-network tests (cold start awaits refresh() up to 10s). Force key-less.
+const savedKey = process.env.HAWIYAT_API_KEY
+delete process.env.HAWIYAT_API_KEY
+
 import plugin from "../src/index"
-import { isCustomerFacingModelId } from "../src/hawiyat/catalog"
-import { FALLBACK_MODELS } from "../src/hawiyat/fallback-models"
+import {
+  fetchModels,
+  isCustomerFacingModelId,
+  writeCache,
+  type CatalogModel,
+} from "../src/hawiyat/catalog"
+import { BASE_URL, ORIGIN } from "../src/constants"
 import { normalizeStreamingFetch, isOpenAIChunk } from "../src/hawiyat/stream"
 
 interface Calls {
@@ -149,19 +159,29 @@ function makeIntegrationEditor(calls: Calls): unknown {
   }
 }
 
-const calls: Calls = {
-  providerAdds: 0,
-  modelAdds: 0,
-  providerInfos: [],
-  providerModels: [],
-  toolAdds: [],
-  toolUpdates: [],
-  commands: [],
-  hooks: [],
-  agentUpdates: [],
-  integrationUpdates: [],
-  keyMethods: [],
-  envMethods: [],
+function newCalls(): Calls {
+  return {
+    providerAdds: 0,
+    modelAdds: 0,
+    providerInfos: [],
+    providerModels: [],
+    toolAdds: [],
+    toolUpdates: [],
+    commands: [],
+    hooks: [],
+    agentUpdates: [],
+    integrationUpdates: [],
+    keyMethods: [],
+    envMethods: [],
+  }
+}
+
+const calls: Calls = newCalls()
+
+async function runSetup() {
+  const fresh = newCalls()
+  const cleanup = await plugin.setup(makeFakeContext(fresh) as never)
+  return { fresh, cleanup }
 }
 
 describe("plugin setup", () => {
@@ -195,28 +215,56 @@ describe("plugin setup", () => {
     expect(info.settings?.apiKey).toBeUndefined()
   })
 
-  test("seeds the bundled fallback catalog on a cold start with no key", () => {
-    // No cache and no credentials in the sandbox -> the bundled catalog is used.
-    // The bound is loose on purpose: the fallback is filtered to
-    // customer-facing ids separately.
-    expect(calls.modelAdds).toBeGreaterThan(20)
+  test("registers the provider with zero models on a key-less cold start (no bundle)", () => {
+    // No cache and no credentials in the sandbox -> empty state. The provider
+    // is still registered (with its /connect integration link) and populates
+    // on the first successful /v1/models fetch.
+    expect(calls.providerAdds).toBe(1)
+    expect(calls.modelAdds).toBe(0)
+    expect(calls.providerModels).toEqual([])
   })
 
-  test("renders unknown model cost as no pricing instead of $0", () => {
-    const byId = new Map(calls.providerModels.map((m) => [m.id, m]))
-    const unknown = byId.get("hawiyat-composer") as { cost?: unknown[] } | undefined
-    expect(unknown?.cost).toEqual([])
-    const known = byId.get("claude-fable-5.1") as { cost?: Array<{ input: number }> } | undefined
-    expect(known?.cost).toHaveLength(1)
-    expect(known?.cost?.[0]?.input).toBeGreaterThan(0)
+  test("hydrates the provider from the on-disk cache and renders cost honestly", async () => {
+    const zeroCost: CatalogModel = {
+      id: "test-unknown-cost",
+      name: "test-unknown-cost",
+      reasoning: false,
+      input: ["text"],
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    }
+    const priced: CatalogModel = {
+      id: "test-priced",
+      name: "test-priced",
+      reasoning: false,
+      input: ["text"],
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+      cost: { input: 5, output: 15, cacheRead: 0, cacheWrite: 0 },
+    }
+    writeCache([zeroCost, priced])
+    try {
+      const { fresh, cleanup } = await runSetup()
+      try {
+        expect(fresh.modelAdds).toBe(2)
+        const byId = new Map(fresh.providerModels.map((m) => [m.id, m]))
+        // Gateway reports null prices as 0; OpenCode would render a zeroed
+        // tier as "$0", so no tier at all ("no pricing") is emitted instead.
+        expect((byId.get("test-unknown-cost") as { cost?: unknown[] }).cost).toEqual([])
+        const known = byId.get("test-priced") as { cost?: Array<{ input: number }> }
+        expect(known?.cost).toHaveLength(1)
+        expect(known?.cost?.[0]?.input).toBeGreaterThan(0)
+      } finally {
+        if (typeof cleanup === "function") await cleanup()
+      }
+    } finally {
+      // Keep scenarios independent: no later setup call may observe this fixture.
+      rmSync(join(process.env.XDG_CACHE_HOME!, "opencode", "hawiyat-models.json"), { force: true })
+    }
   })
 
-  test("ships only customer-facing fallback ids", () => {
-    expect(FALLBACK_MODELS.length).toBeGreaterThan(20)
-    expect(FALLBACK_MODELS.every((m) => isCustomerFacingModelId(m.id))).toBe(true)
-  })
-
-  test("never ships known-internal model ids", () => {
+  test("rejects known-internal model ids", () => {
     // Hard-coded fixture, deliberately independent of isCustomerFacingModelId:
     // it must fail when the filter is too weak, not just when it changes.
     const KNOWN_INTERNAL_IDS = [
@@ -248,8 +296,31 @@ describe("plugin setup", () => {
       "hawiyat-composer-demo",
     ]
     for (const id of KNOWN_INTERNAL_IDS) expect(isCustomerFacingModelId(id)).toBe(false)
-    const shipped = new Set(FALLBACK_MODELS.map((m) => m.id))
-    for (const id of KNOWN_INTERNAL_IDS) expect(shipped.has(id)).toBe(false)
+  })
+
+  test("drops internal ids on the live fetch path", async () => {
+    const realFetch = globalThis.fetch
+    globalThis.fetch = (async (url: unknown) => {
+      const target = String(url)
+      if (target === `${ORIGIN}/model_group/info`) {
+        return new Response(JSON.stringify({ data: [] }), { status: 200 })
+      }
+      if (target === `${BASE_URL}/models`) {
+        return new Response(
+          JSON.stringify({
+            data: [{ id: "claude-fable-5.1" }, { id: "hawiyat_auto_router" }, { id: "h-d4-fast" }],
+          }),
+          { status: 200 },
+        )
+      }
+      throw new Error(`unexpected fetch: ${target}`)
+    }) as typeof fetch
+    try {
+      const models = await fetchModels("test-key", AbortSignal.timeout(5_000))
+      expect(models.map((m) => m.id)).toEqual(["claude-fable-5.1"])
+    } finally {
+      globalThis.fetch = realFetch
+    }
   })
 
   test("registers the stats command and usage_stats tool", () => {
@@ -307,5 +378,6 @@ describe("hawiyat stream normalization", () => {
 })
 
 afterAll(() => {
+  if (savedKey !== undefined) process.env.HAWIYAT_API_KEY = savedKey
   rmSync(sandbox, { recursive: true, force: true })
 })
