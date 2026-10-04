@@ -107,30 +107,25 @@ function makeKeyResolver(ctx: Context): KeyResolver {
 }
 
 /** Convert a catalog entry into the OpenCode model shape. */
-function toModelInfo(model: CatalogModel): unknown {
+function toModelInfo(model: CatalogModel): Model.Info {
+  const id = model.id as Model.ID
   // The gateway reports null prices for models whose cost is unknown; the
   // capture stores those as 0. OpenCode renders a zeroed tier as `$0`, so emit
   // no tier at all ("no pricing") instead of a misleading free tier.
   const hasKnownCost = model.cost.input > 0 || model.cost.output > 0
   return {
-    id: model.id,
-    modelID: model.id,
-    providerID: PROVIDER_ID,
-    name: model.name,
+    ...Model.Info.default(PROVIDER_ID as Provider.ID, id),
+    name: id,
     capabilities: { tools: true, input: model.input, output: ["text"] },
-    variants: [],
-    time: { released: 0 },
     cost: hasKnownCost
       ? [
           {
-            input: model.cost.input,
-            output: model.cost.output,
-            cache: { read: model.cost.cacheRead, write: model.cost.cacheWrite },
+            input: asPrice(model.cost.input),
+            output: asPrice(model.cost.output),
+            cache: { read: asPrice(model.cost.cacheRead), write: asPrice(model.cost.cacheWrite) },
           },
         ]
       : [],
-    status: "active",
-    enabled: true,
     limit: { context: model.contextWindow, output: model.maxTokens },
     compatibility: {
       supportsPromptCacheKey: false,
@@ -138,6 +133,17 @@ function toModelInfo(model: CatalogModel): unknown {
       reasoningField: "reasoning_content",
     },
   }
+}
+
+type CostTier = Exclude<Model.Info["cost"][number], undefined>
+
+/**
+ * Brand a per-million price with the schema's money type. Values originate
+ * from `perMillion()`, which already converts per-token → per-million, so the
+ * brand documents provenance rather than converting.
+ */
+function asPrice(value: number): CostTier["input"] {
+  return value as CostTier["input"]
 }
 
 export async function setupHawiyat(ctx: Context, cleanups: Cleanup[]): Promise<Registration[]> {
@@ -224,7 +230,7 @@ export async function setupHawiyat(ctx: Context, cleanups: Cleanup[]): Promise<R
       }
       editor.add({
         info,
-        models: state.models.map(toModelInfo) as Model.Info[],
+        models: state.models.map(toModelInfo),
       })
     }),
   )
