@@ -216,6 +216,42 @@ describe("plugin setup", () => {
     expect(FALLBACK_MODELS.every((m) => isCustomerFacingModelId(m.id))).toBe(true)
   })
 
+  test("never ships known-internal model ids", () => {
+    // Hard-coded fixture, deliberately independent of isCustomerFacingModelId:
+    // it must fail when the filter is too weak, not just when it changes.
+    const KNOWN_INTERNAL_IDS = [
+      // bare h- leaf namespace
+      "h-d4-fast",
+      "h-mm3",
+      "h-nw-k26-fast",
+      "h-ri-d4-p",
+      "h-tr-d4-v",
+      // -h- leaf infix
+      "claude-h-astra",
+      "claude-h-d41-flash",
+      "claude-h-g53-flash",
+      "claude-h-o55",
+      "claude-h-o55f",
+      "claude-h-o55tr",
+      "claude-h-sol6-f",
+      // provider tag
+      "claude-opus-5.5-af",
+      // routers / components
+      "Analyzer",
+      "hawiyat_auto_router",
+      "claude-opus-router",
+      // upstream-named / lab ids
+      "h-d4-fast-apifun",
+      "h-d4-pro-apifun",
+      "tmp-oc-router",
+      "tmp-glm53-leaf",
+      "hawiyat-composer-demo",
+    ]
+    for (const id of KNOWN_INTERNAL_IDS) expect(isCustomerFacingModelId(id)).toBe(false)
+    const shipped = new Set(FALLBACK_MODELS.map((m) => m.id))
+    for (const id of KNOWN_INTERNAL_IDS) expect(shipped.has(id)).toBe(false)
+  })
+
   test("registers the stats command and usage_stats tool", () => {
     expect(calls.commands).toContain("stats")
     expect(calls.toolAdds).toContain("usage_stats")

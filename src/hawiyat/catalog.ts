@@ -59,11 +59,15 @@ const NON_CHAT_ID = /(^text-embedding|^tts-|whisper|transcribe|^gpt-image|dall-e
 /**
  * Gateway-internal / leaf / provider-routing ids that must never surface to a
  * customer. OpenAI-compatible ids use [a-z0-9./-]; a bare `h-` leaf namespace,
- * `tmp-`/`demo`, `apifun`, an underscore, or a router/leaf/Analyzer name marks
- * an internal entry.
+ * a `-h-` leaf infix (`claude-h-*`), `tmp-`/`demo`, `apifun`, an `-af`
+ * provider tag, or a router/leaf/auto_router name marks an internal entry.
+ *
+ * Deliberately NOT a bare-underscore match: the live catalog is filtered with
+ * this predicate too, and a legitimate future id containing `_` must not
+ * silently vanish from a paying customer's picker.
  */
 const INTERNAL_MODEL_ID =
-  /(^h-|^tmp[-_]|^Analyzer$|[-_]demo|[-_]router$|[-_]leaf$|[-_]apifun$|_)/i
+  /(^h-|-h-|^tmp[-_]|^Analyzer$|[-_]demo|[-_]router$|[-_]leaf$|[-_]apifun$|[-_]af$|auto_router)/i
 
 export function isCustomerFacingModelId(id: string): boolean {
   return !INTERNAL_MODEL_ID.test(id)
@@ -142,15 +146,28 @@ export async function fetchModels(apiKey: string, signal: AbortSignal): Promise<
   const entries = Array.isArray(payload.data) ? payload.data : []
   const models: CatalogModel[] = []
   const seen = new Set<string>()
+  const skippedInternal: string[] = []
   for (const raw of entries) {
     if (typeof raw !== "object" || raw === null) continue
     const entry = raw as Record<string, unknown>
     const id = asString(entry.id)
     if (!id || seen.has(id)) continue
+    if (!isCustomerFacingModelId(id)) {
+      skippedInternal.push(id)
+      continue
+    }
     const model = toModel(id, entry, info.get(id))
     if (!model) continue
     seen.add(id)
     models.push(model)
+  }
+  if (skippedInternal.length > 0) {
+    // Debug-level so a future over-filter is visible in the field without
+    // spamming normal logs: a legit id landing here means the predicate above
+    // needs narrowing.
+    console.debug(
+      `[hawiyat] filtered ${skippedInternal.length} internal model ids: ${skippedInternal.join(", ")}`,
+    )
   }
   return models.sort((a, b) => a.id.localeCompare(b.id))
 }
