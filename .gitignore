@@ -2,8 +2,9 @@ node_modules/
 bun.lockb
 package-lock.json
 dist/
-*.log
 .DS_Store
+.devbox/
+*.log
 
 # Local caches / runtime state that must never be committed
 .hawiyat-models.json
