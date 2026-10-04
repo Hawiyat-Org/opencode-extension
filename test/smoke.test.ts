@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 
 // Keep the plugin away from the real caches/config while testing.
 const sandbox = mkdtempSync(join(tmpdir(), "hawiyat-ext-"))
@@ -308,6 +308,7 @@ describe("plugin setup", () => {
       maxTokens: 16_384,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     }
+    mkdirSync(dirname(cacheFilePath()), { recursive: true })
     writeFileSync(cacheFilePath(), `${JSON.stringify({ version: 1, checkedAt: Date.now(), models: [clean] })}\n`)
     try {
       const { fresh, cleanup } = await runSetup()
