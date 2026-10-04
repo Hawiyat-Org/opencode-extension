@@ -133,7 +133,7 @@ the pi implementation already tolerates.
 ```bash
 $ bun install          # 291 packages
 $ bun run typecheck    # tsc --noEmit, clean
-$ bun test             # 12 pass, 0 fail
+$ bun test             # 13 pass, 0 fail
 ```
 
 ### Loaded into a real OpenCode 2.0.16
