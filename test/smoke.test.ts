@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { existsSync, mkdtempSync, rmSync } from "node:fs"
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -17,6 +17,7 @@ delete process.env.HAWIYAT_API_KEY
 
 import plugin from "../src/index"
 import {
+  cacheFilePath,
   fetchModels,
   isCustomerFacingModelId,
   writeCache,
@@ -260,6 +261,62 @@ describe("plugin setup", () => {
       }
     } finally {
       // Keep scenarios independent: no later setup call may observe this fixture.
+      rmSync(join(process.env.XDG_CACHE_HOME!, "opencode", "hawiyat-models.json"), { force: true })
+    }
+  })
+
+  test("drops internal ids inherited from a stale cache", async () => {
+    const internal: CatalogModel = {
+      id: "claude-h-d41-flash",
+      name: "claude-h-d41-flash",
+      reasoning: false,
+      input: ["text"],
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    }
+    const clean: CatalogModel = {
+      id: "test-clean",
+      name: "test-clean",
+      reasoning: false,
+      input: ["text"],
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    }
+    writeCache([internal, clean])
+    try {
+      const { fresh, cleanup } = await runSetup()
+      try {
+        const ids = fresh.providerModels.map((m) => m.id)
+        expect(ids).toEqual(["test-clean"])
+      } finally {
+        if (typeof cleanup === "function") await cleanup()
+      }
+    } finally {
+      rmSync(join(process.env.XDG_CACHE_HOME!, "opencode", "hawiyat-models.json"), { force: true })
+    }
+  })
+
+  test("ignores caches written by older versions", async () => {
+    const clean: CatalogModel = {
+      id: "test-clean",
+      name: "test-clean",
+      reasoning: false,
+      input: ["text"],
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    }
+    writeFileSync(cacheFilePath(), `${JSON.stringify({ version: 1, checkedAt: Date.now(), models: [clean] })}\n`)
+    try {
+      const { fresh, cleanup } = await runSetup()
+      try {
+        expect(fresh.providerModels).toEqual([])
+      } finally {
+        if (typeof cleanup === "function") await cleanup()
+      }
+    } finally {
       rmSync(join(process.env.XDG_CACHE_HOME!, "opencode", "hawiyat-models.json"), { force: true })
     }
   })

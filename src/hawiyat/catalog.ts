@@ -30,12 +30,12 @@ export interface CatalogModel {
 }
 
 interface CacheFile {
-  version: 1
+  version: 2
   checkedAt: number
   models: CatalogModel[]
 }
 
-const CACHE_VERSION = 1
+const CACHE_VERSION = 2
 
 function cachePath(): string {
   const base = process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache")
@@ -175,7 +175,8 @@ export async function fetchModels(apiKey: string, signal: AbortSignal): Promise<
 export function readCache(): CatalogModel[] {
   try {
     const parsed = JSON.parse(readFileSync(cachePath(), "utf8")) as Partial<CacheFile>
-    return parsed?.version === CACHE_VERSION && Array.isArray(parsed.models) ? parsed.models : []
+    if (parsed?.version !== CACHE_VERSION || !Array.isArray(parsed.models)) return []
+    return parsed.models.filter((m) => typeof m?.id === "string" && isCustomerFacingModelId(m.id))
   } catch {
     return []
   }
